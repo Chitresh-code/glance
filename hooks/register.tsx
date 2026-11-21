@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, FsEntry, Color, Hook } from 'claude-code'
-import { renderMermaidASCII } from './vendor/mermaid.js'
+import { layouts, pick, relations } from './diagram'
 import { fuzzy } from './fuzzy'
 
 const PANE = 'files'
@@ -17,6 +17,8 @@ const follow = atom({ plugin: 'glance', key: 'follow' } as const, true)
 const diff = atom({ plugin: 'glance', key: 'diff' } as const, false)
 // null while not searching; the text typed in the find box otherwise.
 const query = atom({ plugin: 'glance', key: 'query' } as const, null as string | null)
+// How far a diagram wider than the pane is panned, in columns, for the file it was panned in.
+const pan = atom({ plugin: 'glance', key: 'pan' } as const, { path: '', x: 0 })
 const MAX_EDITS = 50
 const MAX_INDEX = 20000
 const MAX_RESULTS = 40
@@ -142,7 +144,8 @@ export const register: Register = on => {
   on('command.run', { command: 'files' }, async ($, e) => {
     const isDock = e.presentation?.isFullscreen === true
     // Inline above the prompt the pane would push the chat away, so keep it short there.
-    const r = await $.ui.open({ id: PANE, title: 'Files', focus: true, columns: 64, backgroundColor: 'transparent', ...(isDock ? {} : { rows: 14 }) })
+    // Docked, ask for as wide as allowed: the engine caps the dock at 45% of the terminal, and a width the person dragged wins.
+    const r = await $.ui.open({ id: PANE, title: 'Files', focus: true, columns: 400, backgroundColor: 'transparent', ...(isDock ? {} : { rows: 14 }) })
     if (!r.isPlaced) return { text: `Files pane waiting: ${r.reason}` }
     return {
       text: isDock
@@ -153,18 +156,38 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Code, Markdown, Input } = $.ui.resolve(e)
-    // Plain monospace via Code with no language; a diagram that does not parse shows why plus its source.
+    // Pan offset and the widest diagram drawn, set while the file view builds its body.
+    let x = 0
+    let widest = 0
     const diagram = (src: string, key: string) => {
-      try {
-        return <Code key={key} source={renderMermaidASCII(src, { colorMode: 'none', paddingX: 3, paddingY: 2 })} wrap="truncate-end" />
-      } catch (err) {
+      const er = relations(src)
+      if (er !== null && er.length > 0) {
+        return (
+          <Box key={key} flexDirection="column" paddingLeft={2} marginY={1}>
+            {er.map((r, i) => (
+              <Box key={`e${i}`} gap={1}>
+                <Text bold color="suggestion">{r.from}</Text>
+                <Text color="inactive">─ {r.label} →</Text>
+                <Text bold color="suggestion">{r.to}</Text>
+                <Text color="subtle">{r.card}</Text>
+              </Box>
+            ))}
+          </Box>
+        )
+      }
+      const arts = layouts(src)
+      if (arts instanceof Error) {
         return (
           <Box key={key} flexDirection="column">
-            <Text color="warning">  mermaid: {String(err)}</Text>
+            <Text color="warning">  mermaid: {arts.message}</Text>
             <Code source={src} language="mermaid" wrap="truncate-end" />
           </Box>
         )
       }
+      const art = pick(arts, width)
+      widest = Math.max(widest, art.width)
+      const shown = art.width <= width ? art.text : art.text.split('\n').map(l => l.slice(x, x + width)).join('\n')
+      return <Code key={key} source={shown} wrap="truncate-end" />
     }
     const width = Math.max(20, e.props.bodyColumns)
     const top = await read($, root)
@@ -246,6 +269,8 @@ export const register: Register = on => {
 
     if (path !== null) {
       const showRaw = await read($, raw)
+      const held = await read($, pan)
+      x = held.path === path ? held.x : 0
       const edit = changed.find(c => c.path === path)
       const showDiff = edit !== undefined && edit.patch !== '' && (await read($, diff))
       const name = path.split('/').pop()!
@@ -300,6 +325,17 @@ export const register: Register = on => {
             </Box>
           </Box>
           {crumbs !== '' && <Text color="inactive">{fit(crumbs, width)}</Text>}
+          {widest > width && (() => {
+            const step = Math.max(8, Math.floor(width / 2))
+            const move = (d: number) => void update($, pan, () => ({ path, x: Math.max(0, Math.min(widest - width, x + d)) }))
+            return (
+              <Box gap={2}>
+                <Button key="left" plain hotkey="h" onPress={() => move(-step)}>◂ left</Button>
+                <Text color="inactive">diagram columns {x + 1}–{Math.min(x + width, widest)} of {widest}</Text>
+                <Button key="right" plain hotkey="l" onPress={() => move(step)}>right ▸</Button>
+              </Box>
+            )
+          })()}
           <Text color="subtle">{'─'.repeat(width)}</Text>
           {body}
         </Box>

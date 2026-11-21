@@ -12,6 +12,7 @@ declare module 'claude-code' {
       follow: boolean
       diff: boolean
       query: string | null
+      pan: { path: string; x: number }
     }
   }
 }

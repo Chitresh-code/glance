@@ -49,3 +49,29 @@ test('a diagram that does not parse shows a warning and its source', async ($, o
   expect(await ui.find({ type: 'Text', text: /mermaid:/ })).toBeTruthy()
   await ui.unmount()
 })
+
+test('a diagram wider than the pane can be panned instead of being cut off', async ($, on) => {
+  on('state.get', (_, e, next) => (e.key === 'file' ? { value: { value: 'wide.mmd', version: 1 } } : next(e)))
+  on('fs.read', () => ({ value: 'sequenceDiagram\n  Scheduler->>SendQueueWorker: a long message that makes this diagram very wide\n  SendQueueWorker->>RenderServiceProcess: another long message drawn across the page' }))
+
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 40 } })
+  const before = String((await ui.find({ type: 'Code' }))?.props?.source)
+  expect(Math.max(...before.split('\n').map(l => l.length))).toBeLessThanOrEqual(40)
+  expect(await ui.find({ type: 'Text', text: /diagram columns 1–40 of/ })).toBeTruthy()
+
+  await ui.press({ key: 'right' })
+  expect(String((await ui.find({ type: 'Code' }))?.props?.source)).not.toBe(before)
+  expect(await ui.find({ type: 'Text', text: /diagram columns 21–/ })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('an ER diagram is listed as relationships', async ($, on) => {
+  on('state.get', (_, e, next) => (e.key === 'file' ? { value: { value: 'model.mmd', version: 1 } } : next(e)))
+  on('fs.read', () => ({ value: 'erDiagram\n  USER ||--o{ MEMBERSHIP : has\n  WORKSPACE ||--|| SUBSCRIPTION : has' }))
+
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Text', text: 'MEMBERSHIP' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '1 → 0..n' })).toBeTruthy()
+  expect(await ui.find({ type: 'Code' })).toBeFalsy()
+  await ui.unmount()
+})
