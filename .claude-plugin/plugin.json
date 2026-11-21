@@ -1,0 +1,8 @@
+{
+  "name": "glance",
+  "version": "0.1.0",
+  "description": "Browse the filesystem as a tree and view code and Markdown in a pane beside the Claude Code chat",
+  "license": "MIT",
+  "keywords": ["files", "explorer", "tree", "pane", "viewer"],
+  "types": "./types/index.d.ts"
+}

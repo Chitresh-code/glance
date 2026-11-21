@@ -1,0 +1,6 @@
+{
+  "name": "glance",
+  "owner": { "name": "Chitresh-code" },
+  "description": "A file explorer pane for Claude Code",
+  "plugins": [{ "name": "glance", "source": "./" }]
+}

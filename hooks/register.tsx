@@ -1,0 +1,227 @@
+import { atom, read, update } from 'claude-code'
+import type { Register, FsEntry, Color } from 'claude-code'
+
+const PANE = 'files'
+const MAX_LINES = 3000
+const MAX_ROWS = 1500
+const root = atom({ plugin: 'glance', key: 'root' } as const, '.')
+const expanded = atom({ plugin: 'glance', key: 'expanded' } as const, [] as string[])
+const file = atom({ plugin: 'glance', key: 'file' } as const, null as string | null)
+const hidden = atom({ plugin: 'glance', key: 'hidden' } as const, false)
+const raw = atom({ plugin: 'glance', key: 'raw' } as const, false)
+// One drawing holds at most 100000 characters, so longer files are cut below that.
+const MAX_CHARS = 90000
+
+const join = (a: string, b: string) => (a === '.' ? b : `${a}/${b}`)
+// Pops a segment, or climbs above the working directory with "..".
+const up = (p: string) => {
+  if (p === '.') return '..'
+  const parts = p.split('/')
+  if (parts[parts.length - 1] === '..') return `${p}/..`
+  return parts.length === 1 ? '.' : parts.slice(0, -1).join('/')
+}
+const ext = (p: string) => (p.includes('.') ? p.split('.').pop()!.toLowerCase() : '')
+const size = (n: number) =>
+  n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`
+const fit = (s: string, w: number) => (s.length <= w ? s : `…${s.slice(s.length - w + 1)}`)
+// Theme keys, not raw colors, so the pane follows the person's Claude Code theme (light, dark, custom).
+const COLORS: Record<string, Color> = {
+  ts: 'permission', tsx: 'permission', js: 'warning', jsx: 'warning', mjs: 'warning', py: 'success', rs: 'error',
+  go: 'suggestion', md: 'remember', json: 'warning', yml: 'merged', yaml: 'merged', toml: 'merged', html: 'error',
+  css: 'suggestion', sh: 'success', sql: 'suggestion', lock: 'inactive',
+}
+// Emoji, not Nerd Font glyphs: they draw in any terminal font without setup.
+const BY_NAME: Record<string, string> = {
+  'package.json': '📦', 'package-lock.json': '🔒', 'yarn.lock': '🔒', 'pnpm-lock.yaml': '🔒', 'uv.lock': '🔒',
+  dockerfile: '🐳', 'docker-compose.yml': '🐳', makefile: '🔨', '.gitignore': '🙈', '.env': '🔑', license: '📜',
+  'readme.md': '📖', 'claude.md': '🟠', 'agents.md': '🤖', 'changelog.md': '📰',
+}
+const BY_EXT: Record<string, string> = {
+  ts: '🔷', tsx: '🌀', js: '🟨', jsx: '🌀', mjs: '🟨', cjs: '🟨', py: '🐍', rs: '🦀', go: '🐹', rb: '💎', java: '☕',
+  kt: '🟣', swift: '🐦', c: '🔵', cpp: '🔵', h: '🔵', cs: '🟪', php: '🐘', lua: '🌙', md: '📝', mdx: '📝', txt: '📄',
+  json: '🧾', yml: '🧾', yaml: '🧾', toml: '🧾', ini: '🧾', xml: '🧾', html: '🌐', css: '🎨', scss: '🎨', svg: '🎨',
+  png: '🌄', jpg: '🌄', jpeg: '🌄', gif: '🌄', webp: '🌄', ico: '🌄', pdf: '📕', zip: '📦', gz: '📦', tar: '📦',
+  sh: '🐚', zsh: '🐚', bash: '🐚', sql: '💾', db: '💾', sqlite: '💾', lock: '🔒', log: '📃', env: '🔑', csv: '📊',
+  test: '🧪', ipynb: '📓', vue: '💚', svelte: '🧡', dart: '🎯', ex: '💧', exs: '💧', hs: '🟪', zig: '⚡',
+}
+const icon = (name: string, isDir: boolean, isOpen: boolean) => {
+  if (isDir) return isOpen ? '📂' : '📁'
+  const n = name.toLowerCase()
+  if (BY_NAME[n]) return BY_NAME[n]
+  if (/\.(test|spec)\.[a-z]+$/.test(n)) return '🧪'
+  if (n.startsWith('.env')) return '🔑'
+  return BY_EXT[ext(n)] ?? '📄'
+}
+const isMarkdown = (p: string) => ['md', 'mdx', 'markdown'].includes(ext(p))
+
+const sortEntries = (list: FsEntry[], showHidden: boolean) =>
+  list
+    .filter(en => showHidden || !en.name.startsWith('.'))
+    .sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1))
+
+type Row = { path: string; entry: FsEntry; depth: number; isOpen: boolean; isLast: boolean[] }
+
+export const register: Register = on => {
+  // The row under the focus ring and the folder rows last drawn; module memory is enough,
+  // a reload just forgets the highlight until the next arrow press.
+  let focused = ''
+  let dirs = new Set<string>()
+
+  on('ui.focus', { requestId: PANE }, async ($, e, next) => {
+    focused = e.element?.startsWith('row:') ? e.element.slice(4) : ''
+    return next(e)
+  })
+
+  on('session.start', async ($, e, next) => {
+    await $.command.register({ name: 'files', description: 'Browse files and view code beside the chat' })
+    return next(e)
+  })
+
+  on('command.run', { command: 'files' }, async ($, e) => {
+    const isDock = e.presentation?.isFullscreen === true
+    // Inline above the prompt the pane would push the chat away, so keep it short there.
+    const r = await $.ui.open({ id: PANE, title: 'Files', focus: true, columns: 64, backgroundColor: 'transparent', ...(isDock ? {} : { rows: 14 }) })
+    if (!r.isPlaced) return { text: `Files pane waiting: ${r.reason}` }
+    return {
+      text: isDock
+        ? 'Files pane opened.'
+        : 'Files pane opened above the prompt. For a sidebar beside the chat, start Claude Code in the fullscreen layout: CLAUDE_CODE_NO_FLICKER=1 claude',
+    }
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const { Box, Text, Button, Code, Markdown } = $.ui.resolve(e)
+    const width = Math.max(20, e.props.bodyColumns)
+    const top = await read($, root)
+    const path = await read($, file)
+    const showHidden = await read($, hidden)
+    const hint = (keys: string) => <Text color="inactive">{keys}</Text>
+
+    if (path !== null) {
+      const showRaw = await read($, raw)
+      const name = path.split('/').pop()!
+      const isMd = isMarkdown(path)
+      let body
+      let meta = ''
+      try {
+        const text = await $.fs.read(path)
+        const lines = text.split('\n')
+        let shown = lines.slice(0, MAX_LINES).join('\n')
+        if (shown.length > MAX_CHARS) shown = shown.slice(0, shown.lastIndexOf('\n', MAX_CHARS))
+        const cut = text.length - shown.length
+        meta = `${lines.length} lines · ${size(text.length)}`
+        body = (
+          <Box flexDirection="column">
+            {isMd && !showRaw
+              ? <Markdown text={shown} />
+              : <Code source={shown} path={path} startLine={1} wrap="truncate-end" />}
+            {cut > 0 && <Text color="inactive">  … {size(cut)} more not shown</Text>}
+          </Box>
+        )
+      } catch (err) {
+        body = <Text color="error">  Cannot open this file: {String(err)}</Text>
+      }
+      const crumbs = path.split('/').slice(0, -1).filter(x => x !== '.').join(' › ')
+      return (
+        <Box flexDirection="column">
+          <Box justifyContent="space-between" width={width}>
+            <Box gap={1}>
+              <Button key="back" plain hotkey="b" autoFocus onPress={() => void update($, file, () => null)}>back</Button>
+              <Text>{icon(name, false, false)}</Text>
+              <Text bold color={COLORS[ext(path)] ?? 'text'}>{name}</Text>
+            </Box>
+            <Box gap={2}>
+              {isMd && (
+                <Button key="raw" plain hotkey="p" onPress={() => void update($, raw, v => !v)}>
+                  {showRaw ? 'preview' : 'source'}
+                </Button>
+              )}
+              <Text color="inactive">{meta}</Text>
+            </Box>
+          </Box>
+          {crumbs !== '' && <Text color="inactive">{fit(crumbs, width)}</Text>}
+          <Text color="subtle">{'─'.repeat(width)}</Text>
+          {body}
+        </Box>
+      )
+    }
+
+    const open = new Set(await read($, expanded))
+    const rows: Row[] = []
+    let error = ''
+    const walk = async (dir: string, depth: number, isLast: boolean[]) => {
+      let list: FsEntry[]
+      try {
+        list = sortEntries(await $.fs.list(dir), showHidden)
+      } catch (err) {
+        if (depth === 0) error = String(err)
+        return
+      }
+      for (const [i, entry] of list.entries()) {
+        if (rows.length >= MAX_ROWS) return
+        const p = join(dir, entry.name)
+        const last = [...isLast, i === list.length - 1]
+        const isOpen = entry.kind === 'dir' && open.has(p)
+        rows.push({ path: p, entry, depth, isOpen, isLast: last })
+        if (isOpen) await walk(p, depth + 1, last)
+      }
+    }
+    await walk(top, 0, [])
+    dirs = new Set(rows.filter(r => r.entry.kind === 'dir').map(r => r.path))
+
+    const toggle = (p: string) =>
+      void update($, expanded, list => (list.includes(p) ? list.filter(x => x !== p) : [...list, p]))
+    const setRoot = (p: string) => {
+      void update($, root, () => p)
+      void update($, expanded, () => [])
+    }
+
+    return (
+      <Box flexDirection="column">
+        <Box justifyContent="space-between" width={width}>
+          <Text bold color="claude">{fit(top === '.' ? './' : `${top}/`, width - 28)}</Text>
+          <Box gap={2}>
+            <Button key="up" plain hotkey="u" onPress={() => setRoot(up(top))}>up</Button>
+            <Button key="down" plain hotkey="d" onPress={() => { if (dirs.has(focused)) setRoot(focused) }}>into</Button>
+            <Button key="hidden" plain hotkey="h" onPress={() => void update($, hidden, v => !v)}>
+              {showHidden ? 'hide dot' : 'dotfiles'}
+            </Button>
+            <Button key="collapse" plain hotkey="c" onPress={() => void update($, expanded, () => [])}>collapse</Button>
+          </Box>
+        </Box>
+        <Text color="subtle">{'─'.repeat(width)}</Text>
+        {error !== '' && <Text color="error">Cannot list {top}: {error}</Text>}
+        {error === '' && rows.length === 0 && <Text dimColor>  (empty)</Text>}
+        {rows.map((row, i) => {
+          const guide = row.isLast.slice(0, -1).map(l => (l ? '   ' : '│  ')).join('') + (row.isLast.at(-1) ? '└─ ' : '├─ ')
+          const isDir = row.entry.kind === 'dir'
+          const isDot = row.entry.name.startsWith('.')
+          const label = `${isDir ? (row.isOpen ? '▾' : '▸') : ' '} ${icon(row.entry.name, isDir, row.isOpen)} ${row.entry.name}${isDir ? '/' : ''}`
+          const meta = isDir ? '' : row.entry.isLink ? 'link' : size(row.entry.size)
+          return (
+            <Box key={`r:${row.path}`} justifyContent="space-between" width={width}>
+              <Box>
+                <Text color="subtle">{guide}</Text>
+                <Button
+                  key={`row:${row.path}`}
+                  plain
+                  dimColor={isDot}
+                  {...(i === 0 ? { autoFocus: true as const } : {})}
+                  onPress={() => (isDir ? toggle(row.path) : void update($, file, () => row.path))}
+                >
+                  <Text color={isDir ? 'suggestion' : COLORS[ext(row.entry.name)] ?? 'text'} bold={isDir}>
+                    {fit(label, Math.max(8, width - guide.length - meta.length - 2))}
+                  </Text>
+                </Button>
+              </Box>
+              <Text color="inactive">{meta}</Text>
+            </Box>
+          )
+        })}
+        {rows.length >= MAX_ROWS && <Text dimColor>  … list cut at {MAX_ROWS} rows, collapse some folders</Text>}
+        <Text color="subtle">{'─'.repeat(width)}</Text>
+        {hint('↑↓ move · enter open/expand · u up · d into folder · h dotfiles · c collapse · esc chat')}
+      </Box>
+    )
+  })
+}
