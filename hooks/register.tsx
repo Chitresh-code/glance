@@ -1,6 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { Register, FsEntry, Color } from 'claude-code'
+import type { Register, FsEntry, Color, Hook } from 'claude-code'
 import { renderMermaidASCII } from './vendor/mermaid.js'
+import { fuzzy } from './fuzzy'
 
 const PANE = 'files'
 const MAX_LINES = 3000
@@ -10,6 +11,17 @@ const expanded = atom({ plugin: 'glance', key: 'expanded' } as const, [] as stri
 const file = atom({ plugin: 'glance', key: 'file' } as const, null as string | null)
 const hidden = atom({ plugin: 'glance', key: 'hidden' } as const, false)
 const raw = atom({ plugin: 'glance', key: 'raw' } as const, false)
+// Files Claude changed this session, newest first, each with its latest edit as unified-diff hunks.
+const edits = atom({ plugin: 'glance', key: 'edits' } as const, [] as { path: string; patch: string }[])
+const follow = atom({ plugin: 'glance', key: 'follow' } as const, true)
+const diff = atom({ plugin: 'glance', key: 'diff' } as const, false)
+// null while not searching; the text typed in the find box otherwise.
+const query = atom({ plugin: 'glance', key: 'query' } as const, null as string | null)
+const MAX_EDITS = 50
+const MAX_INDEX = 20000
+const MAX_RESULTS = 40
+// Folders a project search never walks: build output and package caches swamp the results.
+const SKIP = new Set(['node_modules', '.git', 'dist', 'build', 'out', 'target', '.next', '.venv', 'venv', '__pycache__', '.cache', 'coverage'])
 // One drawing holds at most 100000 characters, so longer files are cut below that.
 const MAX_CHARS = 90000
 
@@ -69,6 +81,18 @@ const splitMermaid = (md: string) => {
   return parts
 }
 
+type Hunk = { oldStart: number; oldLines: number; newStart: number; newLines: number; lines: string[] }
+// shortcut: shows only the latest edit to a file, not everything since the session began; keep the first originalFile and diff against it if that is wanted.
+const toPatch = (hunks: readonly Hunk[]) => {
+  let out = ''
+  for (const h of hunks) {
+    const next = `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@\n${h.lines.join('\n')}\n`
+    if (out.length + next.length > MAX_CHARS) break
+    out += next
+  }
+  return out
+}
+
 const sortEntries = (list: FsEntry[], showHidden: boolean) =>
   list
     .filter(en => showHidden || !en.name.startsWith('.'))
@@ -76,11 +100,34 @@ const sortEntries = (list: FsEntry[], showHidden: boolean) =>
 
 type Row = { path: string; entry: FsEntry; depth: number; isOpen: boolean; isLast: boolean[] }
 
+// The project's file list for find, built on first search and dropped when Claude creates a file.
+let index: { key: string; files: string[] } | null = null
+
+// Records each file Claude edits or writes, and opens its diff while following is on.
+const onWrite: Hook<'tool.call'> = async ($, e, next) => {
+  if (e.tool !== 'Edit' && e.tool !== 'Write') return next(e)
+  const r = await next(e)
+  const out = r.result as { filePath?: string; structuredPatch?: Hunk[]; type?: string; staged?: boolean } | undefined
+  if (r.isError || !out?.filePath || out.staged) return r
+  const cwd = await $.session.cwd()
+  const rel = out.filePath.startsWith(`${cwd}/`) ? out.filePath.slice(cwd.length + 1) : out.filePath
+  const patch = toPatch(out.structuredPatch ?? [])
+  if (out.type === 'create') index = null
+  await update($, edits, list => [{ path: rel, patch }, ...list.filter(x => x.path !== rel)].slice(0, MAX_EDITS))
+  if (await read($, follow)) {
+    await update($, file, () => rel)
+    await update($, diff, () => patch !== '')
+    await update($, query, () => null)
+  }
+  return r
+}
 export const register: Register = on => {
   // The row under the focus ring and the folder rows last drawn; module memory is enough,
   // a reload just forgets the highlight until the next arrow press.
   let focused = ''
   let dirs = new Set<string>()
+
+  on('tool.call', onWrite)
 
   on('ui.focus', { requestId: PANE }, async ($, e, next) => {
     focused = e.element?.startsWith('row:') ? e.element.slice(4) : ''
@@ -105,7 +152,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button, Code, Markdown } = $.ui.resolve(e)
+    const { Box, Text, Button, Code, Markdown, Input } = $.ui.resolve(e)
     // Plain monospace via Code with no language; a diagram that does not parse shows why plus its source.
     const diagram = (src: string, key: string) => {
       try {
@@ -124,9 +171,83 @@ export const register: Register = on => {
     const path = await read($, file)
     const showHidden = await read($, hidden)
     const hint = (keys: string) => <Text color="inactive">{keys}</Text>
+    const changed = await read($, edits)
+    const q = await read($, query)
+
+    if (q !== null) {
+      const key = `${top}|${showHidden}`
+      if (index?.key !== key) {
+        const files: string[] = []
+        const queue = [top]
+        while (queue.length > 0 && files.length < MAX_INDEX) {
+          const dir = queue.shift()!
+          let list: FsEntry[]
+          try {
+            list = await $.fs.list(dir)
+          } catch {
+            continue
+          }
+          for (const en of list) {
+            if (!showHidden && en.name.startsWith('.')) continue
+            const p = join(dir, en.name)
+            if (en.kind === 'dir') { if (!SKIP.has(en.name)) queue.push(p) } else files.push(p)
+          }
+        }
+        index = { key, files }
+      }
+      const prefix = top === '.' ? '' : `${top}/`
+      const hits = q.trim() === ''
+        ? changed.map(c => c.path).filter(p => p.startsWith(prefix)).slice(0, MAX_RESULTS).map(p => ({ p, s: 0 }))
+        : index.files
+            .map(p => ({ p, s: fuzzy(q, p.slice(prefix.length)) }))
+            .filter((x): x is { p: string; s: number } => x.s !== null)
+            .sort((a, b) => b.s - a.s)
+            .slice(0, MAX_RESULTS)
+      const openFile = (p: string) => {
+        void update($, file, () => p)
+        void update($, diff, () => false)
+        void update($, query, () => null)
+      }
+      return (
+        <Box flexDirection="column">
+          <Box justifyContent="space-between" width={width}>
+            <Text bold color="claude">🔍 Find in {fit(top === '.' ? './' : `${top}/`, width - 24)}</Text>
+            <Button key="cancel" plain onPress={() => void update($, query, () => null)}>cancel</Button>
+          </Box>
+          <Input
+            key="find"
+            autoFocus
+            placeholder="type part of a file name"
+            value={q}
+            submitLabel="open"
+            onInput={v => void update($, query, () => v)}
+            onSubmit={() => { if (hits[0]) openFile(hits[0].p) }}
+          />
+          <Text color="subtle">{'─'.repeat(width)}</Text>
+          {hits.length === 0 && <Text dimColor>  {q.trim() === '' ? 'type to search' : 'no matches'}</Text>}
+          {hits.map(({ p }) => {
+            const name = p.split('/').pop()!
+            const dir = p.slice(prefix.length, p.length - name.length)
+            return (
+              <Box key={`h:${p}`} gap={1}>
+                <Button key={`hit:${p}`} plain onPress={() => openFile(p)}>
+                  <Text color={COLORS[ext(name)] ?? 'text'}>{icon(name, false, false)} {name}</Text>
+                </Button>
+                <Text color="inactive">{fit(dir, Math.max(4, width - name.length - 6))}</Text>
+              </Box>
+            )
+          })}
+          {index.files.length >= MAX_INDEX && <Text dimColor>  search covers the first {MAX_INDEX} files</Text>}
+          <Text color="subtle">{'─'.repeat(width)}</Text>
+          {hint('type to filter · enter opens the top match · ↓ pick a result · esc chat')}
+        </Box>
+      )
+    }
 
     if (path !== null) {
       const showRaw = await read($, raw)
+      const edit = changed.find(c => c.path === path)
+      const showDiff = edit !== undefined && edit.patch !== '' && (await read($, diff))
       const name = path.split('/').pop()!
       const isMd = isMarkdown(path)
       const isDiagram = isMermaid(path)
@@ -141,7 +262,9 @@ export const register: Register = on => {
         meta = `${lines.length} lines · ${size(text.length)}`
         body = (
           <Box flexDirection="column">
-            {showRaw || !(isMd || isDiagram)
+            {showDiff
+              ? <Code source={edit.patch} path={path} format="diff" wrap="truncate-end" />
+              : showRaw || !(isMd || isDiagram)
               ? <Code source={shown} path={path} startLine={1} wrap="truncate-end" />
               : isDiagram
                 ? diagram(shown, 'diagram')
@@ -163,7 +286,12 @@ export const register: Register = on => {
               <Text bold color={COLORS[ext(path)] ?? 'text'}>{name}</Text>
             </Box>
             <Box gap={2}>
-              {(isMd || isDiagram) && (
+              {edit !== undefined && edit.patch !== '' && (
+                <Button key="diff" plain hotkey="v" onPress={() => void update($, diff, v => !v)}>
+                  {showDiff ? 'file' : 'diff'}
+                </Button>
+              )}
+              {(isMd || isDiagram) && !showDiff && (
                 <Button key="raw" plain hotkey="p" onPress={() => void update($, raw, v => !v)}>
                   {showRaw ? 'preview' : 'source'}
                 </Button>
@@ -201,6 +329,9 @@ export const register: Register = on => {
     await walk(top, 0, [])
     dirs = new Set(rows.filter(r => r.entry.kind === 'dir').map(r => r.path))
 
+    const isFollowing = await read($, follow)
+    const touched = new Set(changed.map(c => c.path))
+    const touchedDirs = new Set(changed.flatMap(c => c.path.split('/').slice(0, -1).map((_, i, a) => a.slice(0, i + 1).join('/'))))
     const toggle = (p: string) =>
       void update($, expanded, list => (list.includes(p) ? list.filter(x => x !== p) : [...list, p]))
     const setRoot = (p: string) => {
@@ -221,6 +352,13 @@ export const register: Register = on => {
             <Button key="collapse" plain hotkey="c" onPress={() => void update($, expanded, () => [])}>collapse</Button>
           </Box>
         </Box>
+        <Box gap={2}>
+          <Button key="find" plain hotkey="f" onPress={() => void update($, query, () => '')}>🔍 find</Button>
+          <Button key="follow" plain hotkey="w" onPress={() => void update($, follow, v => !v)}>
+            {isFollowing ? '👁 following edits' : '👁 follow off'}
+          </Button>
+          {changed.length > 0 && <Text color="warning">● {changed.length} edited</Text>}
+        </Box>
         <Text color="subtle">{'─'.repeat(width)}</Text>
         {error !== '' && <Text color="error">Cannot list {top}: {error}</Text>}
         {error === '' && rows.length === 0 && <Text dimColor>  (empty)</Text>}
@@ -229,7 +367,8 @@ export const register: Register = on => {
           const isDir = row.entry.kind === 'dir'
           const isDot = row.entry.name.startsWith('.')
           const label = `${isDir ? (row.isOpen ? '▾' : '▸') : ' '} ${icon(row.entry.name, isDir, row.isOpen)} ${row.entry.name}${isDir ? '/' : ''}`
-          const meta = isDir ? '' : row.entry.isLink ? 'link' : size(row.entry.size)
+          const isTouched = isDir ? touchedDirs.has(row.path) : touched.has(row.path)
+          const meta = (isTouched ? '● ' : '') + (isDir ? '' : row.entry.isLink ? 'link' : size(row.entry.size))
           return (
             <Box key={`r:${row.path}`} justifyContent="space-between" width={width}>
               <Box>
@@ -246,13 +385,13 @@ export const register: Register = on => {
                   </Text>
                 </Button>
               </Box>
-              <Text color="inactive">{meta}</Text>
+              <Text color={isTouched ? 'warning' : 'inactive'}>{meta}</Text>
             </Box>
           )
         })}
         {rows.length >= MAX_ROWS && <Text dimColor>  … list cut at {MAX_ROWS} rows, collapse some folders</Text>}
         <Text color="subtle">{'─'.repeat(width)}</Text>
-        {hint('↑↓ move · enter open/expand · u up · d into folder · h dotfiles · c collapse · esc chat')}
+        {hint('↑↓ move · enter open · f find · w follow · u up · d into · h dotfiles · c collapse')}
       </Box>
     )
   })

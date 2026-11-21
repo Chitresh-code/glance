@@ -25,13 +25,19 @@ Run `/files`. The pane takes the keyboard; Esc returns to the prompt.
 - ↑ ↓ move, Enter expands a folder or opens a file
 - `u` moves the tree root up a folder, `d` makes the highlighted folder the root
 - `h` shows or hides dotfiles, `c` collapses every folder
-- In a file: `b` goes back, `p` switches Markdown and Mermaid between preview and source
+- `f` finds a file: type part of its path, Enter opens the best match, or ↓ to pick another. With nothing typed it lists the files Claude edited. `node_modules`, `.git` and build folders are skipped.
+- `w` turns following Claude's edits on or off (on by default)
+- In a file: `b` goes back, `p` switches Markdown and Mermaid between preview and source, `v` switches between the file and Claude's last change to it
+
+## Following Claude's edits
+
+Whenever Claude edits or writes a file, glance marks it with a ● in the tree (folders that contain it get one too) and, while following is on, opens the file showing the diff of that edit. Press `v` to see the whole file. The diff shows Claude's latest edit to that file, not every change since the session began.
 
 The pane docks on the right beside the chat in Claude Code's fullscreen layout (`CLAUDE_CODE_NO_FLICKER=1 claude`). On the main screen it opens as a short block above the prompt. Colors follow your Claude Code theme.
 
 ## Limits
 
-Read only: it does not edit, create, rename or delete files. A file shows its first 3000 lines or about 90 KB, and files over 4 MiB do not open. The tree shows at most 1500 rows at once.
+Read only: it does not edit, create, rename or delete files. A file shows its first 3000 lines or about 90 KB, and files over 4 MiB do not open. The tree shows at most 1500 rows at once, and find searches the first 20000 files.
 
 ## Third-party code
 
