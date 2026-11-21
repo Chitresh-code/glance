@@ -75,3 +75,23 @@ test('an ER diagram is listed as relationships', async ($, on) => {
   expect(await ui.find({ type: 'Code' })).toBeFalsy()
   await ui.unmount()
 })
+
+test('o writes the diagrams to a page and opens it in the browser', async ($, on) => {
+  const ran: string[][] = []
+  let written = ''
+  on('state.get', (_, e, next) => (e.key === 'file' ? { value: { value: 'doc.md', version: 1 } } : next(e)))
+  on('fs.read', () => ({ value: '# Doc\n\n```mermaid\ngraph LR\n  A["<b>x</b>"] --> B\n```\n' }))
+  on('fs.write', (_, e) => { written = e.text; return { value: undefined } })
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    return { value: { exitCode: 0, stdout: e.argv[0] === 'mktemp' ? '/tmp/g1\n' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+
+  const ui = await $.ui.mount(PANE)
+  await ui.press({ key: 'browser' })
+
+  expect(ran.at(-1)).toEqual(['open', '/tmp/g1/doc.md.html'])
+  expect(written).toContain('&lt;b&gt;x&lt;/b&gt;')
+  expect(written).not.toContain('<b>x</b>')
+  await ui.unmount()
+})

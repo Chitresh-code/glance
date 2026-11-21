@@ -35,7 +35,7 @@ Run `/files`. The pane takes the keyboard; Esc returns to the prompt.
 - `h` shows or hides dotfiles, `c` collapses every folder
 - `f` finds a file: type part of its path, Enter opens the best match, or ↓ to pick another. With nothing typed it lists the files Claude edited. `node_modules`, `.git` and build folders are skipped.
 - `w` turns following Claude's edits on or off (on by default)
-- In a file: `b` goes back, `p` switches Markdown and Mermaid between preview and source, `v` switches between the file and Claude's last change to it, `h` and `l` pan a diagram wider than the pane
+- In a file: `b` goes back, `p` switches Markdown and Mermaid between preview and source, `v` switches between the file and Claude's last change to it, `h` and `l` pan a diagram wider than the pane, `o` opens the file's diagrams in your browser, drawn full size by Mermaid itself
 
 ## Following Claude's edits
 

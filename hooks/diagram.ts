@@ -48,3 +48,28 @@ export const relations = (src: string): Relation[] | null => {
     out.push({ from: m[1]!, to: m[4]!, label: m[5]!, card: `${CARD[m[2]!] ?? '?'} → ${CARD[m[3]!] ?? '?'}` })
   return out
 }
+
+const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+// A page that draws the diagrams with Mermaid itself, for when text art is too cramped; follows the system light or dark mode.
+export const page = (title: string, sources: string[]) => `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escape(title)}</title>
+<style>
+:root { color-scheme: light dark; --bg: #faf9f5; --fg: #1f1e1d; --rule: #e0ddd4 }
+@media (prefers-color-scheme: dark) { :root { --bg: #1f1e1d; --fg: #eeece2; --rule: #3a3936 } }
+body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 14px/1.5 ui-sans-serif, system-ui, sans-serif }
+h1 { font-size: 16px; font-weight: 600; margin: 0 auto 16px; max-width: 1200px }
+section { max-width: 1200px; margin: 0 auto 32px; padding-bottom: 32px; border-bottom: 1px solid var(--rule); overflow-x: auto }
+.mermaid { display: flex; justify-content: center }
+</style></head><body>
+<h1>${escape(title)}</h1>
+${sources.map(s => `<section><pre class="mermaid">${escape(s)}</pre></section>`).join('\n')}
+<script type="module">
+import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs'
+const dark = matchMedia('(prefers-color-scheme: dark)').matches
+mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'neutral', securityLevel: 'strict' })
+await mermaid.run()
+</script>
+</body></html>
+`

@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, FsEntry, Color, Hook } from 'claude-code'
-import { layouts, pick, relations } from './diagram'
+import { layouts, page, pick, relations } from './diagram'
 import { fuzzy } from './fuzzy'
 
 const PANE = 'files'
@@ -278,6 +278,7 @@ export const register: Register = on => {
       const isDiagram = isMermaid(path)
       let body
       let meta = ''
+      let sources: string[] = []
       try {
         const text = await $.fs.read(path)
         const lines = text.split('\n')
@@ -285,6 +286,7 @@ export const register: Register = on => {
         if (shown.length > MAX_CHARS) shown = shown.slice(0, shown.lastIndexOf('\n', MAX_CHARS))
         const cut = text.length - shown.length
         meta = `${lines.length} lines · ${size(text.length)}`
+        sources = isDiagram ? [text] : isMd ? splitMermaid(text).filter(p => p.kind === 'mermaid').map(p => p.text) : []
         body = (
           <Box flexDirection="column">
             {showDiff
@@ -325,6 +327,22 @@ export const register: Register = on => {
             </Box>
           </Box>
           {crumbs !== '' && <Text color="inactive">{fit(crumbs, width)}</Text>}
+          {sources.length > 0 && (
+            <Box gap={2}>
+              <Button key="browser" plain hotkey="o" onPress={() => void (async () => {
+                try {
+                  const dir = (await $.process.run(['mktemp', '-d'])).stdout.trim()
+                  const out = `${dir}/${name.replace(/[^\w.-]/g, '_')}.html`
+                  await $.fs.write(out, page(name, sources))
+                  const viaOpen = await $.process.run(['open', out]).catch(() => ({ exitCode: 1 }))
+                  if (viaOpen.exitCode !== 0) await $.process.run(['xdg-open', out])
+                  $.ui.toast(`Opened ${sources.length === 1 ? 'the diagram' : `${sources.length} diagrams`} in the browser`)
+                } catch (err) {
+                  $.ui.toast(`Could not open the browser: ${String(err)}`)
+                }
+              })()}>🌐 open diagrams in browser</Button>
+            </Box>
+          )}
           {widest > width && (() => {
             const step = Math.max(8, Math.floor(width / 2))
             const move = (d: number) => void update($, pan, () => ({ path, x: Math.max(0, Math.min(widest - width, x + d)) }))

@@ -1,6 +1,6 @@
 {
   "name": "glance",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Browse and search the filesystem, view code and Markdown, and follow Claude's edits in a pane beside the chat",
   "license": "MIT",
   "keywords": ["files", "explorer", "tree", "pane", "viewer"],
