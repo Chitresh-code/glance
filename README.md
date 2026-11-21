@@ -18,6 +18,14 @@ From a shell:
 claude plugin install glance --marketplace Chitresh-code/glance
 ```
 
+### Updates
+
+Claude Code updates a plugin when its version number changes. Marketplaces other than Anthropic's own have auto-update off by default, so turn it on once: run `/plugin`, open **Marketplaces**, pick **glance** and choose **Enable auto-update**. Claude Code then pulls new versions at startup. To update by hand instead:
+
+```
+claude plugin marketplace update glance
+```
+
 ## Use
 
 Run `/files`. The pane takes the keyboard; Esc returns to the prompt.
@@ -50,5 +58,7 @@ claude --plugin-dir .
 claude plugin validate .
 claude plugin test .
 ```
+
+Raise `version` in `.claude-plugin/plugin.json` with every release: installed copies only update when it changes.
 
 Once a session has loaded the plugin, `tsc -p .` type-checks it against the types Claude Code writes into `.claude-plugin/types/`.
