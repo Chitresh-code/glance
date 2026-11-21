@@ -1,5 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, FsEntry, Color } from 'claude-code'
+import { renderMermaidASCII } from './vendor/mermaid.js'
 
 const PANE = 'files'
 const MAX_LINES = 3000
@@ -38,7 +39,7 @@ const BY_NAME: Record<string, string> = {
 }
 const BY_EXT: Record<string, string> = {
   ts: '🔷', tsx: '🌀', js: '🟨', jsx: '🌀', mjs: '🟨', cjs: '🟨', py: '🐍', rs: '🦀', go: '🐹', rb: '💎', java: '☕',
-  kt: '🟣', swift: '🐦', c: '🔵', cpp: '🔵', h: '🔵', cs: '🟪', php: '🐘', lua: '🌙', md: '📝', mdx: '📝', txt: '📄',
+  kt: '🟣', swift: '🐦', c: '🔵', cpp: '🔵', h: '🔵', cs: '🟪', php: '🐘', lua: '🌙', md: '📝', mdx: '📝', mmd: '🧜', mermaid: '🧜', txt: '📄',
   json: '🧾', yml: '🧾', yaml: '🧾', toml: '🧾', ini: '🧾', xml: '🧾', html: '🌐', css: '🎨', scss: '🎨', svg: '🎨',
   png: '🌄', jpg: '🌄', jpeg: '🌄', gif: '🌄', webp: '🌄', ico: '🌄', pdf: '📕', zip: '📦', gz: '📦', tar: '📦',
   sh: '🐚', zsh: '🐚', bash: '🐚', sql: '💾', db: '💾', sqlite: '💾', lock: '🔒', log: '📃', env: '🔑', csv: '📊',
@@ -53,6 +54,20 @@ const icon = (name: string, isDir: boolean, isOpen: boolean) => {
   return BY_EXT[ext(n)] ?? '📄'
 }
 const isMarkdown = (p: string) => ['md', 'mdx', 'markdown'].includes(ext(p))
+const isMermaid = (p: string) => ['mmd', 'mermaid'].includes(ext(p))
+// Markdown split into prose and ```mermaid fences, so each fence can be drawn as a diagram.
+const FENCE = /^```mermaid[^\n]*\n([\s\S]*?)^```[ \t]*$/gm
+const splitMermaid = (md: string) => {
+  const parts: { kind: 'md' | 'mermaid'; text: string }[] = []
+  let at = 0
+  for (const m of md.matchAll(FENCE)) {
+    if (m.index > at) parts.push({ kind: 'md', text: md.slice(at, m.index) })
+    parts.push({ kind: 'mermaid', text: m[1] ?? '' })
+    at = m.index + m[0].length
+  }
+  if (at < md.length) parts.push({ kind: 'md', text: md.slice(at) })
+  return parts
+}
 
 const sortEntries = (list: FsEntry[], showHidden: boolean) =>
   list
@@ -91,6 +106,19 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Code, Markdown } = $.ui.resolve(e)
+    // Plain monospace via Code with no language; a diagram that does not parse shows why plus its source.
+    const diagram = (src: string, key: string) => {
+      try {
+        return <Code key={key} source={renderMermaidASCII(src, { colorMode: 'none', paddingX: 3, paddingY: 2 })} wrap="truncate-end" />
+      } catch (err) {
+        return (
+          <Box key={key} flexDirection="column">
+            <Text color="warning">  mermaid: {String(err)}</Text>
+            <Code source={src} language="mermaid" wrap="truncate-end" />
+          </Box>
+        )
+      }
+    }
     const width = Math.max(20, e.props.bodyColumns)
     const top = await read($, root)
     const path = await read($, file)
@@ -101,6 +129,7 @@ export const register: Register = on => {
       const showRaw = await read($, raw)
       const name = path.split('/').pop()!
       const isMd = isMarkdown(path)
+      const isDiagram = isMermaid(path)
       let body
       let meta = ''
       try {
@@ -112,9 +141,12 @@ export const register: Register = on => {
         meta = `${lines.length} lines · ${size(text.length)}`
         body = (
           <Box flexDirection="column">
-            {isMd && !showRaw
-              ? <Markdown text={shown} />
-              : <Code source={shown} path={path} startLine={1} wrap="truncate-end" />}
+            {showRaw || !(isMd || isDiagram)
+              ? <Code source={shown} path={path} startLine={1} wrap="truncate-end" />
+              : isDiagram
+                ? diagram(shown, 'diagram')
+                : splitMermaid(shown).map((part, i) =>
+                    part.kind === 'mermaid' ? diagram(part.text, `d${i}`) : <Markdown key={`m${i}`} text={part.text} />)}
             {cut > 0 && <Text color="inactive">  … {size(cut)} more not shown</Text>}
           </Box>
         )
@@ -131,7 +163,7 @@ export const register: Register = on => {
               <Text bold color={COLORS[ext(path)] ?? 'text'}>{name}</Text>
             </Box>
             <Box gap={2}>
-              {isMd && (
+              {(isMd || isDiagram) && (
                 <Button key="raw" plain hotkey="p" onPress={() => void update($, raw, v => !v)}>
                   {showRaw ? 'preview' : 'source'}
                 </Button>
